@@ -1,3 +1,4 @@
+// pizzaz_server_node/src/server.ts
 import {
   createServer,
   type IncomingMessage,
@@ -153,7 +154,6 @@ const tools: Tool[] = widgets.map((widget) => ({
   inputSchema: toolInputSchema,
   title: widget.title,
   _meta: widgetMeta(widget),
-  // To disable the approval prompt for the widgets
   annotations: {
     destructiveHint: false,
     openWorldHint: false,
@@ -193,20 +193,14 @@ function createPizzazServer(): Server {
 
   server.setRequestHandler(
     ListResourcesRequestSchema,
-    async (_request: ListResourcesRequest) => ({
-      resources,
-    })
+    async (_request: ListResourcesRequest) => ({ resources })
   );
 
   server.setRequestHandler(
     ReadResourceRequestSchema,
     async (request: ReadResourceRequest) => {
       const widget = widgetsByUri.get(request.params.uri);
-
-      if (!widget) {
-        throw new Error(`Unknown resource: ${request.params.uri}`);
-      }
-
+      if (!widget) throw new Error(`Unknown resource: ${request.params.uri}`);
       return {
         contents: [
           {
@@ -222,39 +216,23 @@ function createPizzazServer(): Server {
 
   server.setRequestHandler(
     ListResourceTemplatesRequestSchema,
-    async (_request: ListResourceTemplatesRequest) => ({
-      resourceTemplates,
-    })
+    async (_request: ListResourceTemplatesRequest) => ({ resourceTemplates })
   );
 
   server.setRequestHandler(
     ListToolsRequestSchema,
-    async (_request: ListToolsRequest) => ({
-      tools,
-    })
+    async (_request: ListToolsRequest) => ({ tools })
   );
 
   server.setRequestHandler(
     CallToolRequestSchema,
     async (request: CallToolRequest) => {
       const widget = widgetsById.get(request.params.name);
-
-      if (!widget) {
-        throw new Error(`Unknown tool: ${request.params.name}`);
-      }
-
+      if (!widget) throw new Error(`Unknown tool: ${request.params.name}`);
       const args = toolInputParser.parse(request.params.arguments ?? {});
-
       return {
-        content: [
-          {
-            type: "text",
-            text: widget.responseText,
-          },
-        ],
-        structuredContent: {
-          pizzaTopping: args.pizzaTopping,
-        },
+        content: [{ type: "text", text: widget.responseText }],
+        structuredContent: { pizzaTopping: args.pizzaTopping },
         _meta: widgetMeta(widget),
       };
     }
@@ -273,8 +251,40 @@ const sessions = new Map<string, SessionRecord>();
 const ssePath = "/mcp";
 const postPath = "/mcp/messages";
 
+/**
+ * SSE-Handler mit Heartbeat:
+ *  - Setzt SSE-Header
+ *  - Schickt SOFORT ein erstes Byte (":\n\n")
+ *  - Sendet alle 15s einen Ping
+ */
 async function handleSseRequest(res: ServerResponse) {
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
+
+  // *** WICHTIG: SSE-Header und sofortiger Heartbeat,
+  // damit Proxys (Render/NGINX) die Verbindung nicht nach ~30s killen
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  try {
+    // erstes Byte: hält die Leitung „aktiv“
+    res.write(":\n\n");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (res as any).flushHeaders?.();
+  } catch {
+    // ignorieren – falls nicht möglich
+  }
+
+  // regelmäßiger Ping
+  const keepAlive = setInterval(() => {
+    try {
+      res.write("event: ping\ndata: {}\n\n");
+    } catch {
+      // Stream evtl. schon geschlossen
+    }
+  }, 15000);
+
   const server = createPizzazServer();
   const transport = new SSEServerTransport(postPath, res);
   const sessionId = transport.sessionId;
@@ -282,6 +292,7 @@ async function handleSseRequest(res: ServerResponse) {
   sessions.set(sessionId, { server, transport });
 
   transport.onclose = async () => {
+    clearInterval(keepAlive);
     sessions.delete(sessionId);
     await server.close();
   };
@@ -293,6 +304,7 @@ async function handleSseRequest(res: ServerResponse) {
   try {
     await server.connect(transport);
   } catch (error) {
+    clearInterval(keepAlive);
     sessions.delete(sessionId);
     console.error("Failed to start SSE session", error);
     if (!res.headersSent) {
@@ -316,7 +328,6 @@ async function handlePostMessage(
   }
 
   const session = sessions.get(sessionId);
-
   if (!session) {
     res.writeHead(404).end("Unknown session");
     return;
@@ -344,6 +355,7 @@ const httpServer = createServer(
 
     const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
+    // CORS Preflight für SSE/POST
     if (
       req.method === "OPTIONS" &&
       (url.pathname === ssePath || url.pathname === postPath)
