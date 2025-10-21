@@ -8,80 +8,83 @@ import { createProxyMiddleware } from "http-proxy-middleware";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const WEB_PORT = Number(process.env.PORT || 8080); // Render setzt PORT (z. B. 10000)
-const HOST = "0.0.0.0";
+const PORT = Number(process.env.PORT ?? 10000);
+const MCP_PORT = Number(process.env.MCP_PORT ?? 18000);
 
-// *** Eigener Port für den MCP-Child-Prozess ***
-const MCP_PORT = Number(process.env.MCP_PORT || 18000);
+// --- MCP-Server (TypeScript via tsx) starten ---
+console.log("Starte MCP-Server (tsx)…");
+const mcpChild = spawn(
+  process.execPath,
+  ["--import", "tsx/esm", path.join(__dirname, "pizzaz_server_node/src/server.ts")],
+  { stdio: "inherit", env: process.env }
+);
 
+mcpChild.on("exit", (code) => {
+  console.log("MCP child exited:", code);
+});
+
+// --- Express (Frontserver) ---
 const app = express();
 
-// ---------- Assets statisch ----------
-const assetsDir = path.join(__dirname, "assets");
-app.use(express.static(assetsDir, { maxAge: 0, etag: false, lastModified: false }));
-
-// Shortcuts zu den gebauten Dateien (Hash 2d2b aus deinem Build-Log)
-["pizzaz", "pizzaz-list", "pizzaz-carousel", "pizzaz-albums", "solar-system", "todo"].forEach(
-  (name) => {
-    app.get(`/${name}.js`, (_, res) => res.sendFile(path.join(assetsDir, `${name}-2d2b.js`)));
-    app.get(`/${name}.css`, (_, res) => res.sendFile(path.join(assetsDir, `${name}-2d2b.css`)));
-    app.get(`/${name}.html`, (_, res) => res.sendFile(path.join(assetsDir, `${name}.html`)));
-  }
-);
-
 // Health
-app.get("/healthz", (_req, res) => res.json({ ok: true }));
+app.get("/healthz", (req, res) => res.json({ ok: true }));
 
-// ---------- MCP-Server als Child starten ----------
-console.log("Starte MCP-Server (Windows-kompatibel)...");
-const tsxCmd = process.platform === "win32"
-  ? path.join(__dirname, "node_modules", ".bin", "tsx.cmd")
-  : path.join(__dirname, "node_modules", ".bin", "tsx");
-
-const child = spawn(
-  tsxCmd,
-  [path.join(__dirname, "pizzaz_server_node", "src", "server.ts")],
-  {
-    env: { ...process.env, MCP_PORT: String(MCP_PORT) }, // <-- WICHTIG: eigener Port
-    stdio: "inherit",
-  }
-);
-child.on("exit", (code) => console.log("MCP child exited:", code));
-
-// ---------- /mcp → http://127.0.0.1:MCP_PORT (ohne Timeouts, SSE-tauglich) ----------
-app.use(
-  "/mcp",
-  createProxyMiddleware({
-    target: `http://127.0.0.1:${MCP_PORT}`,
-    changeOrigin: true,
-    ws: true,
-    proxyTimeout: 0,
-    timeout: 0,
-    onProxyReq: (proxyReq) => {
-      proxyReq.setHeader("Connection", "keep-alive");
-      proxyReq.setHeader("Cache-Control", "no-cache, no-transform");
-    },
-    onProxyRes: (proxyRes) => {
-      proxyRes.headers["X-Accel-Buffering"] = "no";
-      proxyRes.headers["Cache-Control"] = "no-cache, no-transform";
-      proxyRes.headers["Connection"] = "keep-alive";
-    },
-  })
-);
-
-app.get("/", (_req, res) => {
+// Info-Seite
+app.get("/", (req, res) => {
   res.type("text/plain").send(
     [
       "Pizzaz combined server live.",
-      "Assets: /pizzaz.html  /pizzaz.js  /pizzaz.css ...",
-      "MCP endpoint: GET /mcp (SSE), POST /mcp/messages?sessionId=...",
+      "Assets: /pizzaz.html  /pizzaz.js  /pizzaz.css …",
+      "MCP endpoint: GET /mcp (SSE), POST /mcp/messages?sessionId=…",
       "Health: /healthz",
     ].join("\n")
   );
 });
 
-app.listen(WEB_PORT, HOST, () => {
-  console.log(`✅ Combined server läuft auf http://${HOST}:${WEB_PORT}`);
+// Statische Assets aus /assets
+const assetsDir = path.join(__dirname, "assets");
+app.use(express.static(assetsDir, { fallthrough: true, index: false }));
+
+// Keine Pufferung für SSE
+function sseNoBuffer(req, res, next) {
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  next();
+}
+
+// Proxy zu MCP-Server (SSE + POST)
+const mcpTarget = `http://127.0.0.1:${MCP_PORT}`;
+
+const mcpProxy = createProxyMiddleware({
+  target: mcpTarget,
+  changeOrigin: false,
+  ws: false,
+  proxyTimeout: 0,
+  timeout: 0,
+  pathRewrite: (path) => path,
+  onProxyReq: (proxyReq) => {
+    proxyReq.setHeader("Connection", "keep-alive");
+  },
+  onProxyRes: (proxyRes, req, res) => {
+    res.setHeader("X-Accel-Buffering", "no");
+  },
+});
+
+// Diese Pfade 1:1 an den MCP-Server weiterleiten
+app.get("/mcp", sseNoBuffer, mcpProxy);               // SSE (GET)
+app.post("/mcp/messages", sseNoBuffer, mcpProxy);     // POST messages
+
+// Bequeme Kurzpfade (optional)
+app.get("/pizzaz.js", (req, res) => res.sendFile(path.join(assetsDir, "pizzaz-2d2b.js")));
+app.get("/pizzaz.css", (req, res) => res.sendFile(path.join(assetsDir, "pizzaz-2d2b.css")));
+app.get("/pizzaz.html", (req, res) => res.sendFile(path.join(assetsDir, "pizzaz.html")));
+
+// 404 Fallback
+app.use((req, res) => res.status(404).type("text/plain").send("Not Found"));
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Combined server läuft auf http://0.0.0.0:${PORT}`);
   console.log(`- MCP-Proxy aktiv unter /mcp → 127.0.0.1:${MCP_PORT}`);
-  console.log(`- Beispiel: http://${HOST}:${WEB_PORT}/pizzaz.js`);
+  console.log(`- Beispiel: http://0.0.0.0:${PORT}/pizzaz.js`);
 });
