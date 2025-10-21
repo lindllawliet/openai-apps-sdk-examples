@@ -55,7 +55,7 @@ function readWidgetHtml(componentName: string): string {
   } else {
     const candidates = fs
       .readdirSync(ASSETS_DIR)
-      .filter(f => f.startsWith(`${componentName}-`) && f.endsWith(".html"))
+      .filter((f) => f.startsWith(`${componentName}-`) && f.endsWith(".html"))
       .sort();
     const fallback = candidates[candidates.length - 1];
     if (fallback) htmlContents = fs.readFileSync(path.join(ASSETS_DIR, fallback), "utf8");
@@ -88,7 +88,7 @@ const widgets: PizzazWidget[] = [
 
 const widgetsById = new Map<string, PizzazWidget>();
 const widgetsByUri = new Map<string, PizzazWidget>();
-widgets.forEach(w => { widgetsById.set(w.id, w); widgetsByUri.set(w.templateUri, w); });
+widgets.forEach((w) => { widgetsById.set(w.id, w); widgetsByUri.set(w.templateUri, w); });
 
 const toolInputSchema = {
   type: "object",
@@ -98,7 +98,7 @@ const toolInputSchema = {
 } as const;
 const toolInputParser = z.object({ pizzaTopping: z.string() });
 
-const tools: Tool[] = widgets.map(w => ({
+const tools: Tool[] = widgets.map((w) => ({
   name: w.id,
   description: w.title,
   inputSchema: toolInputSchema,
@@ -107,7 +107,7 @@ const tools: Tool[] = widgets.map(w => ({
   annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
 }));
 
-const resources: Resource[] = widgets.map(w => ({
+const resources: Resource[] = widgets.map((w) => ({
   uri: w.templateUri,
   name: w.title,
   description: `${w.title} widget markup`,
@@ -115,7 +115,7 @@ const resources: Resource[] = widgets.map(w => ({
   _meta: widgetMeta(w),
 }));
 
-const resourceTemplates: ResourceTemplate[] = widgets.map(w => ({
+const resourceTemplates: ResourceTemplate[] = widgets.map((w) => ({
   uriTemplate: w.templateUri,
   name: w.title,
   description: `${w.title} widget markup`,
@@ -150,12 +150,13 @@ const sessions = new Map<string, SessionRecord>();
 const ssePath = "/mcp";
 const postPath = "/mcp/messages";
 
+/** SSE mit Heartbeat, damit Proxys nicht abbrechen. */
 async function handleSseRequest(res: ServerResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no"); // wichtig gegen Proxy-Buffering
+  res.setHeader("X-Accel-Buffering", "no");
 
   try { res.write(":\n\n"); /* erstes Byte */ /* @ts-ignore */ res.flushHeaders?.(); } catch {}
 
@@ -197,8 +198,9 @@ async function handlePostMessage(req: IncomingMessage, res: ServerResponse, url:
   }
 }
 
-const portEnv = Number(process.env.PORT ?? 8000);
-const port = Number.isFinite(portEnv) ? portEnv : 8000;
+// *** WICHTIG: Eigener Port für MCP-Server, NICHT PORT des Hosts! ***
+const mcpPortEnv = Number(process.env.MCP_PORT ?? 18000);
+const MCP_PORT = Number.isFinite(mcpPortEnv) ? mcpPortEnv : 18000;
 
 const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   if (!req.url) { res.writeHead(400).end("Missing URL"); return; }
@@ -224,8 +226,8 @@ httpServer.on("clientError", (err: Error, socket) => {
   socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
 });
 
-httpServer.listen(port, () => {
-  console.log(`Pizzaz MCP server listening on http://localhost:${port}`);
-  console.log(`  SSE stream: GET http://localhost:${port}${ssePath}`);
-  console.log(`  Message post endpoint: POST http://localhost:${port}${postPath}?sessionId=...`);
+httpServer.listen(MCP_PORT, () => {
+  console.log(`Pizzaz MCP server listening on http://localhost:${MCP_PORT}`);
+  console.log(`  SSE stream: GET http://localhost:${MCP_PORT}${ssePath}`);
+  console.log(`  Message post endpoint: POST http://localhost:${MCP_PORT}${postPath}?sessionId=...`);
 });
