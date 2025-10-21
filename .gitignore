@@ -1,0 +1,42 @@
+# ===============================
+# Git ignore for Pizzaz / Node / pnpm workspace
+# Komplett zum Ersetzen – sicher für Render-Deploy
+# ===============================
+
+# Dependency directories
+node_modules/
+.pnpm-store/
+
+# Build outputs (werden auf Render gebaut, nicht committen)
+assets/
+dist/
+build/
+.vite/
+coverage/
+.tmp/
+
+# Logs & caches
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log
+*.tsbuildinfo
+.eslintcache
+
+# Environment files (nicht einchecken)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Editor / OS Müll
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python-Reste (falls irgendwo Skripte liegen)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
