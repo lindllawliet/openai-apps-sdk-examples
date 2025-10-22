@@ -18,13 +18,24 @@ const mcpChild = spawn(
   ["--import", "tsx/esm", path.join(__dirname, "pizzaz_server_node/src/server.ts")],
   { stdio: "inherit", env: process.env }
 );
-
-mcpChild.on("exit", (code) => {
-  console.log("MCP child exited:", code);
-});
+mcpChild.on("exit", (code) => console.log("MCP child exited:", code));
 
 // --- Express (Frontserver) ---
 const app = express();
+
+// ---- gemeinsame Header-Helper ----
+function addCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "content-type");
+}
+
+function addNoBuffer(res) {
+  // wichtig für Render/Proxies, damit SSE nicht gepuffert wird
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+}
 
 // Health
 app.get("/healthz", (req, res) => res.json({ ok: true }));
@@ -45,37 +56,73 @@ app.get("/", (req, res) => {
 const assetsDir = path.join(__dirname, "assets");
 app.use(express.static(assetsDir, { fallthrough: true, index: false }));
 
-// Keine Pufferung für SSE
-function sseNoBuffer(req, res, next) {
-  res.setHeader("X-Accel-Buffering", "no");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  next();
-}
+// --- CORS-Preflight (wird von ChatGPT sehr oft vorab gesendet) ---
+app.options("/mcp", (req, res) => {
+  addCors(res);
+  addNoBuffer(res);
+  res.status(204).end();
+});
+app.options("/mcp/messages", (req, res) => {
+  addCors(res);
+  addNoBuffer(res);
+  res.status(204).end();
+});
 
-// Proxy zu MCP-Server (SSE + POST)
+// --- Proxy zu MCP-Server (SSE + POST) ---
 const mcpTarget = `http://127.0.0.1:${MCP_PORT}`;
+
+// Mini-Logger, damit du im Render-Log siehst, dass Requests ankommen
+app.use((req, _res, next) => {
+  if (req.path === "/mcp" || req.path === "/mcp/messages") {
+    console.log(`[MCP] ${req.method} ${req.originalUrl}`);
+  }
+  next();
+});
 
 const mcpProxy = createProxyMiddleware({
   target: mcpTarget,
   changeOrigin: false,
   ws: false,
+  // wichtig: keine Timeouts/Abbrüche für lange SSE-Sessions
   proxyTimeout: 0,
   timeout: 0,
-  pathRewrite: (path) => path,
-  onProxyReq: (proxyReq) => {
+  preserveHeaderKeyCase: true,
+  selfHandleResponse: false, // Upstream liefert die Antwort, wir fummeln nicht am Body
+  onProxyReq: (proxyReq, req) => {
+    // für GET /mcp (SSE) gerne explizit halten
     proxyReq.setHeader("Connection", "keep-alive");
+    if (req.method === "GET" && req.path === "/mcp") {
+      // Browser/ChatGPT setzen das meist selbst — schadet aber nicht:
+      proxyReq.setHeader("Accept", "text/event-stream");
+      proxyReq.setHeader("Cache-Control", "no-cache");
+    }
   },
   onProxyRes: (proxyRes, req, res) => {
-    res.setHeader("X-Accel-Buffering", "no");
+    addCors(res);
+    addNoBuffer(res);
+    // bei SSE sicherstellen, dass Content-Type passt
+    if (req.method === "GET" && req.path === "/mcp") {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      // content-length bei Streams ist kontraproduktiv
+      res.removeHeader?.("Content-Length");
+      delete proxyRes.headers?.["content-length"];
+    }
   },
 });
 
 // Diese Pfade 1:1 an den MCP-Server weiterleiten
-app.get("/mcp", sseNoBuffer, mcpProxy);               // SSE (GET)
-app.post("/mcp/messages", sseNoBuffer, mcpProxy);     // POST messages
+app.get("/mcp", (req, res, next) => {
+  addCors(res);
+  addNoBuffer(res);
+  return mcpProxy(req, res, next);
+});
+app.post("/mcp/messages", (req, res, next) => {
+  addCors(res);
+  addNoBuffer(res);
+  return mcpProxy(req, res, next);
+});
 
-// Bequeme Kurzpfade (optional)
+// Bequeme Kurzpfade (optional) – Hashes ggf. beim nächsten Build anpassen
 app.get("/pizzaz.js", (req, res) => res.sendFile(path.join(assetsDir, "pizzaz-2d2b.js")));
 app.get("/pizzaz.css", (req, res) => res.sendFile(path.join(assetsDir, "pizzaz-2d2b.css")));
 app.get("/pizzaz.html", (req, res) => res.sendFile(path.join(assetsDir, "pizzaz.html")));
