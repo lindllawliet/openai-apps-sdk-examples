@@ -150,6 +150,7 @@ const tools: Tool[] = widgets.map((w) => ({
   inputSchema: toolInputSchema,
   title: w.title,
   _meta: widgetMeta(w),
+  // keine Approval-Prompts
   annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
 }));
 
@@ -176,7 +177,8 @@ function createPizzazServer(): Server {
   );
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources }));
-  server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (req: ReadResourceRequest) => {
     const w = widgetsByUri.get(req.params.uri);
     if (!w) throw new Error(`Unknown resource: ${req.params.uri}`);
     return {
@@ -190,21 +192,36 @@ function createPizzazServer(): Server {
       ],
     };
   });
+
   server.setRequestHandler(
     ListResourceTemplatesRequestSchema,
-    async () => ({ resourceTemplates })
+    async (_req: ListResourceTemplatesRequest) => ({ resourceTemplates })
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const w = widgetsById.get(req.params.name);
-    if (!w) throw new Error(`Unknown tool: ${req.params.name}`);
-    const args = toolInputParser.parse(req.params.arguments ?? {});
-    return {
-      content: [{ type: "text", text: w.responseText }],
-      structuredContent: { pizzaTopping: args.pizzaTopping },
-      _meta: widgetMeta(w),
-    };
-  });
+
+  server.setRequestHandler(ListToolsRequestSchema, async (_req: ListToolsRequest) => ({ tools }));
+
+  // >>> WICHTIG: Antwort so liefern, dass ChatGPT das Widget einbettet
+  server.setRequestHandler(
+    CallToolRequestSchema,
+    async (req: CallToolRequest) => {
+      const w = widgetsById.get(req.params.name);
+      if (!w) throw new Error(`Unknown tool: ${req.params.name}`);
+
+      const args = toolInputParser.parse(req.params.arguments ?? {});
+      return {
+        content: [{ type: "text", text: w.responseText }],
+        structuredContent: { pizzaTopping: args.pizzaTopping },
+        _meta: {
+          ...widgetMeta(w),
+          // Dieser Block sorgt für die tatsächliche Widget-Einbettung im Chat
+          "openai/widget": {
+            type: "html",
+            uri: w.templateUri,
+          },
+        },
+      };
+    }
+  );
 
   return server;
 }
@@ -215,12 +232,12 @@ const sessions = new Map<string, SessionRecord>();
 const ssePath = "/mcp";
 const postPath = "/mcp/messages";
 
-// === WICHTIG: Auf MCP_PORT hören (nicht PORT) ===
+// Auf MCP_PORT hören (Render: MCP_PORT bleibt 18000 intern)
 const MCP_PORT = Number(process.env.MCP_PORT ?? 18000);
 const HOST = "0.0.0.0";
 
 async function handleSseRequest(res: ServerResponse) {
-  // SSE Header + No-buffering
+  // SSE + no buffering
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -239,7 +256,7 @@ async function handleSseRequest(res: ServerResponse) {
   };
   transport.onerror = (err) => console.error("SSE transport error", err);
 
-  // Heartbeat, damit Proxies die Verbindung nicht schließen
+  // Heartbeat für Proxies
   const hb = setInterval(() => {
     try {
       res.write(`: ping ${Date.now()}\n\n`);
