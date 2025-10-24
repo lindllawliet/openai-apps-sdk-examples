@@ -30,7 +30,7 @@ import { z } from "zod";
 type PizzazWidget = {
   id: string;
   title: string;
-  templateUri: string; // behalten wir, aber Einbettung läuft inline
+  templateUri: string;
   invoking: string;
   invoked: string;
   html: string;
@@ -157,8 +157,7 @@ const resources: Resource[] = widgets.map((w) => ({
   uri: w.templateUri,
   name: w.title,
   description: `${w.title} widget markup`,
-  // wir lassen die Ressourcen bestehen, aber die Einbettung passiert inline
-  mimeType: "text/html",
+  mimeType: "text/html+skybridge",
   _meta: widgetMeta(w),
 }));
 
@@ -166,7 +165,7 @@ const resourceTemplates: ResourceTemplate[] = widgets.map((w) => ({
   uriTemplate: w.templateUri,
   name: w.title,
   description: `${w.title} widget markup`,
-  mimeType: "text/html",
+  mimeType: "text/html+skybridge",
   _meta: widgetMeta(w),
 }));
 
@@ -176,23 +175,16 @@ function createPizzazServer(): Server {
     { capabilities: { resources: {}, tools: {} } }
   );
 
-  server.setRequestHandler(ListResourcesRequestSchema, async (_req: ListResourcesRequest) => {
-    console.log("[MCP] ListResources");
-    return { resources };
-  });
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (req: ReadResourceRequest) => {
-    console.log("[MCP] ReadResource:", req.params.uri);
     const w = widgetsByUri.get(req.params.uri);
-    if (!w) {
-      console.error("[MCP] Unknown resource:", req.params.uri);
-      throw new Error(`Unknown resource: ${req.params.uri}`);
-    }
+    if (!w) throw new Error(`Unknown resource: ${req.params.uri}`);
     return {
       contents: [
         {
           uri: w.templateUri,
-          mimeType: "text/html",
+          mimeType: "text/html+skybridge",
           text: w.html,
           _meta: widgetMeta(w),
         },
@@ -202,40 +194,29 @@ function createPizzazServer(): Server {
 
   server.setRequestHandler(
     ListResourceTemplatesRequestSchema,
-    async (_req: ListResourceTemplatesRequest) => {
-      console.log("[MCP] ListResourceTemplates");
-      return { resourceTemplates };
-    }
+    async (_req: ListResourceTemplatesRequest) => ({ resourceTemplates })
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async (_req: ListToolsRequest) => {
-    console.log("[MCP] ListTools");
-    return { tools };
-  });
+  server.setRequestHandler(ListToolsRequestSchema, async (_req: ListToolsRequest) => ({ tools }));
 
-  // >>> WICHTIG: Inline-HTML ausliefern, um Renderer-424 zu vermeiden
-  server.setRequestHandler(CallToolRequestSchema, async (req: CallToolRequest) => {
-    console.log("[MCP] CallTool:", req.params.name, "args:", req.params.arguments);
-    const w = widgetsById.get(req.params.name);
-    if (!w) {
-      console.error("[MCP] Unknown tool:", req.params.name);
-      throw new Error(`Unknown tool: ${req.params.name}`);
-    }
-
-    const args = toolInputParser.parse(req.params.arguments ?? {});
-    return {
-      content: [{ type: "text", text: w.responseText }],
-      structuredContent: { pizzaTopping: args.pizzaTopping },
-      _meta: {
-        ...widgetMeta(w),
-        // Inline, kein weiterer Fetch durch den Renderer nötig:
-        "openai/widget": {
-          type: "html",
-          html: w.html,
+  // WICHTIG: nur URI angeben, kein Inline-HTML:
+  server.setRequestHandler(
+    CallToolRequestSchema,
+    async (req: CallToolRequest) => {
+      const w = widgetsById.get(req.params.name);
+      if (!w) throw new Error(`Unknown tool: ${req.params.name}`);
+      const args = toolInputParser.parse(req.params.arguments ?? {});
+      return {
+        content: [{ type: "text", text: w.responseText }],
+        structuredContent: { pizzaTopping: args.pizzaTopping },
+        _meta: {
+          ...widgetMeta(w),
+          // Nur Verweis auf die Vorlage:
+          "openai/widget": { type: "html", uri: w.templateUri },
         },
-      },
-    };
-  });
+      };
+    }
+  );
 
   return server;
 }
@@ -245,7 +226,6 @@ const sessions = new Map<string, SessionRecord>();
 
 const ssePath = "/mcp";
 const postPath = "/mcp/messages";
-
 const MCP_PORT = Number(process.env.MCP_PORT ?? 18000);
 const HOST = "0.0.0.0";
 
@@ -259,30 +239,26 @@ async function handleSseRequest(res: ServerResponse) {
   const server = createPizzazServer();
   const transport = new SSEServerTransport(postPath, res);
   const sessionId = transport.sessionId;
-  console.log("[MCP] SSE open, sessionId:", sessionId);
 
   sessions.set(sessionId, { server, transport });
 
   transport.onclose = async () => {
-    console.log("[MCP] SSE close, sessionId:", sessionId);
     sessions.delete(sessionId);
     await server.close();
   };
-  transport.onerror = (err) => {
-    console.error("[MCP] SSE error:", err);
-  };
+  transport.onerror = (err) => console.error("SSE transport error", err);
 
   const hb = setInterval(() => {
     try {
       res.write(`: ping ${Date.now()}\n\n`);
-    } catch (_) {}
+    } catch {}
   }, 15000);
 
   try {
     await server.connect(transport);
   } catch (err) {
     sessions.delete(sessionId);
-    console.error("[MCP] connect failed:", err);
+    console.error("Failed to start SSE session", err);
     if (!res.headersSent) res.writeHead(500).end("Failed to establish SSE connection");
   } finally {
     clearInterval(hb);
@@ -297,64 +273,38 @@ async function handlePostMessage(
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "content-type");
   const sessionId = url.searchParams.get("sessionId");
-  if (!sessionId) {
-    console.error("[MCP] POST without sessionId");
-    res.writeHead(400).end("Missing sessionId");
-    return;
-  }
+  if (!sessionId) return void res.writeHead(400).end("Missing sessionId");
 
   const session = sessions.get(sessionId);
-  if (!session) {
-    console.error("[MCP] POST unknown sessionId:", sessionId);
-    res.writeHead(404).end("Unknown session");
-    return;
-  }
+  if (!session) return void res.writeHead(404).end("Unknown session");
 
   try {
     await session.transport.handlePostMessage(req, res);
   } catch (err) {
-    console.error("[MCP] handlePostMessage failed:", err);
+    console.error("Failed to process message", err);
     if (!res.headersSent) res.writeHead(500).end("Failed to process message");
   }
 }
 
 const httpServer = createServer(async (req, res) => {
-  try {
-    if (!req.url) {
-      res.writeHead(400).end("Missing URL");
-      return;
-    }
+  if (!req.url) return void res.writeHead(400).end("Missing URL");
+  const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
-    const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
-
-    if (req.method === "OPTIONS" && (url.pathname === ssePath || url.pathname === postPath)) {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "content-type",
-        "Cache-Control": "no-cache, no-transform",
-      });
-      res.end();
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname === ssePath) {
-      await handleSseRequest(res);
-      return;
-    }
-
-    if (req.method === "POST" && url.pathname === postPath) {
-      await handlePostMessage(req, res, url);
-      return;
-    }
-
-    res.writeHead(404).end("Not Found");
-  } catch (e) {
-    console.error("[HTTP] top-level error:", e);
-    try {
-      res.writeHead(500).end("Internal Server Error");
-    } catch {}
+  if (req.method === "OPTIONS" && (url.pathname === ssePath || url.pathname === postPath)) {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "content-type",
+      "Cache-Control": "no-cache, no-transform",
+    });
+    return void res.end();
   }
+
+  if (req.method === "GET" && url.pathname === ssePath) return void handleSseRequest(res);
+  if (req.method === "POST" && url.pathname === postPath)
+    return void handlePostMessage(req, res, url);
+
+  res.writeHead(404).end("Not Found");
 });
 
 httpServer.on("clientError", (err: Error, socket) => {
